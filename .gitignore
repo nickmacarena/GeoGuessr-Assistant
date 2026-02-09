@@ -6,6 +6,10 @@ data/mapillary/*.csv
 data/mapillary/venv*/
 data/mapillary/*.zip
 
+# Language detection models (large files)
+data/mapillary/lid.176.bin
+data/mapillary/*.ftz
+
 # Keep the scripts and documentation
 !data/mapillary/mtsd_helper/
 !data/mapillary/*.py
