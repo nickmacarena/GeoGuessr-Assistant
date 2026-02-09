@@ -4,11 +4,15 @@ data/mapillary/crops/
 data/mapillary/sample_ds/
 data/mapillary/*.csv
 data/mapillary/venv*/
+data/mapillary/*.zip
 
 # Keep the scripts and documentation
 !data/mapillary/mtsd_helper/
 !data/mapillary/*.py
 !data/README.md
+
+# Ignore downloaded MTSD documentation
+data/mapillary/mtsd_helper/README.txt
 
 # Python
 __pycache__/
