@@ -17,21 +17,26 @@ from language_detector import LanguageDetector
 class DetectionVisualizer:
     """Visualize text detections and language predictions on images."""
 
-    def __init__(self, csv_path='det_with_text_fasttext.csv', detector=None):
+    def __init__(self, csv_path='det_with_text.csv', detector=None, recompute_language=True):
         """
         Initialize visualizer.
 
         Args:
-            csv_path: Path to CSV with detections and language predictions
+            csv_path: Path to CSV with detections (can be det_with_text.csv or det_with_text_fasttext.csv)
             detector: LanguageDetector instance (creates new one if None)
+            recompute_language: If True, recompute language with current detector (recommended)
         """
         print(f"Loading data from {csv_path}...")
         self.df = pd.read_csv(csv_path)
         self.detector = detector or LanguageDetector()
+        self.recompute_language = recompute_language
 
         # Filter to rows with text detections
         self.df_with_text = self.df[self.df['n_regions'] > 0].copy()
         print(f"Found {len(self.df_with_text):,} images with text detections")
+
+        if recompute_language:
+            print("Note: Will recompute language predictions with current detector")
 
     def get_random_samples(self, n=10, min_confidence=0.5, language=None):
         """
@@ -63,7 +68,7 @@ class DetectionVisualizer:
         n_samples = min(n, len(df))
         return df.sample(n=n_samples)
 
-    def draw_detections(self, image_path, boxes_str, texts_str, language='', confidence=0.0):
+    def draw_detections(self, image_path, boxes_str, texts_str, language='', confidence=0.0, script='unknown'):
         """
         Draw text detections on image.
 
@@ -73,6 +78,7 @@ class DetectionVisualizer:
             texts_str: JSON string of recognized texts
             language: Predicted language code
             confidence: Language prediction confidence
+            script: Detected script (optional)
 
         Returns:
             Annotated image (numpy array)
@@ -157,26 +163,44 @@ class DetectionVisualizer:
             # Get detection data
             boxes = row['boxes']
             texts = row['texts']
-            language = row.get('language_fasttext', 'unknown')
-            confidence = row.get('confidence_fasttext', 0.0)
 
-            # Draw detections
-            img = self.draw_detections(image_path, boxes, texts, language, confidence)
-
-            if img is None:
-                continue
-
-            # Show parsed texts for console output
+            # Parse text for recomputation
             try:
                 parsed_texts = json.loads(texts)
                 combined_text = ' '.join(parsed_texts)
             except:
                 combined_text = "Error parsing texts"
 
+            # Recompute language with current detector if requested
+            if self.recompute_language and combined_text != "Error parsing texts":
+                result = self.detector.detect(combined_text)
+                language = result['language']
+                confidence = result['confidence']
+                script = result.get('script', 'unknown')
+                script_validated = result.get('script_validated', True)
+            else:
+                # Use pre-computed values from CSV
+                language = row.get('language_fasttext', 'unknown')
+                confidence = row.get('confidence_fasttext', 0.0)
+                script = 'unknown'
+                script_validated = True
+
+            # Draw detections
+            img = self.draw_detections(image_path, boxes, texts, language, confidence, script)
+
+            if img is None:
+                continue
+
             print(f"\nImage: {Path(image_path).name}")
             print(f"  Text: '{combined_text}'")
-            print(f"  Language: {self.detector.get_language_name(language)} ({language})")
-            print(f"  Confidence: {confidence:.3f}")
+            if self.recompute_language:
+                print(f"  Script: {script}")
+                print(f"  Language: {self.detector.get_language_name(language)} ({language})")
+                print(f"  Confidence: {confidence:.3f}")
+                print(f"  Validated: {'✓' if script_validated else '✗'}")
+            else:
+                print(f"  Language: {self.detector.get_language_name(language)} ({language})")
+                print(f"  Confidence: {confidence:.3f}")
 
             # Save if output directory specified
             if output_dir:
