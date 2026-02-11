@@ -17,6 +17,7 @@ import fasttext
 import os
 import re
 import warnings
+from pathlib import Path
 from typing import Dict, List, Optional
 
 # Suppress fastText warnings
@@ -26,7 +27,7 @@ warnings.filterwarnings("ignore", message=".*invalid.*UTF-8.*")
 class LanguageDetector:
     """Fast language detection optimized for traffic sign text."""
 
-    MODEL_PATH = "lid.176.bin"
+    MODEL_PATH = str(Path(__file__).parent.parent.parent / "data" / "mapillary" / "lid.176.bin")
     MIN_CONFIDENCE = 0.3  # Threshold for reliable predictions
 
     # Mapping of scripts to valid languages
