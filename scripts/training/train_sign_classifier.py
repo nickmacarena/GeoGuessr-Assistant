@@ -135,15 +135,16 @@ def build_model(backbone, num_classes):
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
-def run_epoch(model, loader, criterion, optimizer, device, train=True):
+def run_epoch(model, loader, criterion, optimizer, device, train=True, desc=""):
     model.train(train)
     total_loss = 0.0
     correct    = 0
     total      = 0
 
+    pbar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True)
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
-        for imgs, labels in loader:
+        for imgs, labels in pbar:
             imgs, labels = imgs.to(device), labels.to(device)
             if train:
                 optimizer.zero_grad()
@@ -155,6 +156,12 @@ def run_epoch(model, loader, criterion, optimizer, device, train=True):
             total_loss += loss.item() * len(labels)
             correct    += (logits.argmax(1) == labels).sum().item()
             total      += len(labels)
+
+            # Live update: show running loss and accuracy in the progress bar
+            pbar.set_postfix({
+                "loss": f"{total_loss / total:.4f}",
+                "acc":  f"{correct / total:.3f}",
+            })
 
     return total_loss / total, correct / total
 
@@ -252,14 +259,18 @@ def main():
     print(f"\nTraining for {args.epochs} epochs...\n")
     for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
-        train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer, device, train=True)
-        val_loss,   val_acc   = run_epoch(model, val_loader,   criterion, None,      device, train=False)
+        train_loss, train_acc = run_epoch(
+            model, train_loader, criterion, optimizer, device, train=True,
+            desc=f"Epoch {epoch:3d}/{args.epochs} [train]")
+        val_loss, val_acc = run_epoch(
+            model, val_loader, criterion, None, device, train=False,
+            desc=f"Epoch {epoch:3d}/{args.epochs} [val]  ")
         scheduler.step()
 
         elapsed = time.time() - t0
         print(f"Epoch {epoch:3d}/{args.epochs}  "
-              f"train_loss={train_loss:.4f}  train_acc={train_acc:.3f}  "
-              f"val_loss={val_loss:.4f}  val_acc={val_acc:.3f}  "
+              f"train loss={train_loss:.4f}  acc={train_acc:.3f}  │  "
+              f"val loss={val_loss:.4f}  acc={val_acc:.3f}  "
               f"({elapsed:.0f}s)")
 
         # Save checkpoint every epoch
