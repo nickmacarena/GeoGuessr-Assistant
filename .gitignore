@@ -46,6 +46,9 @@ Thumbs.db
 .ipynb_checkpoints/
 *.ipynb
 
+# Environment / secrets
+.env
+
 # Models and weights (if you add them later)
 *.pth
 *.pt

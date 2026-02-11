@@ -106,7 +106,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Fetch GPS coords for MTSD images and build sign→country distribution"
     )
-    parser.add_argument("--token", required=True, help="Mapillary API access token")
+    parser.add_argument("--token", default=None, help="Mapillary API access token (or set MAPILLARY_TOKEN env var)")
     parser.add_argument(
         "--ann-dirs",
         nargs="+",
@@ -120,6 +120,12 @@ def main():
     parser.add_argument("--resume",   action="store_true",
                         help="Skip images already in --out-gps")
     args = parser.parse_args()
+
+    # Resolve token from env if not provided
+    if args.token is None:
+        args.token = os.environ.get("MAPILLARY_TOKEN")
+    if not args.token:
+        parser.error("Provide --token or set MAPILLARY_TOKEN in your environment / .env file")
 
     # Resolve paths relative to this script
     script_dir = Path(__file__).parent
