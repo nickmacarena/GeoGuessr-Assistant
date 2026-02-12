@@ -22,7 +22,7 @@ Compared fastText vs lingua-py on 121,238 traffic sign texts:
 | **CJK (Chinese/Japanese)** | ✅ Excellent | ✅ Excellent |
 | **Model agreement** | 19.7% (both models disagree on 80% of cases) |
 
-### Key Findings:
+Key findings:
 - Both models struggle with very short text (1-3 characters)
 - Numbers and abbreviations often misclassified
 - fastText is more conservative and accurate on Western languages
@@ -52,55 +52,7 @@ texts = ["STOP", "ONE WAY", "禁止停车"]
 results = detector.detect_batch(texts)
 ```
 
-### Get Language Name
-
-```python
-lang_name = detector.get_language_name('en')  # Returns: "English"
-```
-
-## Files
-
-- **[language_detector.py](language_detector.py)** - Production module (optimized, clean API)
-- **[add_language_fasttext.py](add_language_fasttext.py)** - Batch processing script for CSVs
-- **[benchmark_language_detection.py](benchmark_language_detection.py)** - Latency benchmarks
-- **[compare_language_models.py](compare_language_models.py)** - fastText vs lingua-py comparison
-- **lid.176.bin** - fastText model (125MB, auto-downloaded)
-
-## Model Download
-
-The model is auto-downloaded on first run. To manually download:
-
-```bash
-wget https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
-```
-
-## Supported Languages
-
-176 languages including:
-- **Western:** English, Spanish, French, German, Italian, Portuguese
-- **Eastern:** Chinese, Japanese, Korean, Thai, Vietnamese
-- **European:** Russian, Polish, Czech, Swedish, Norwegian, Danish
-- **Middle Eastern:** Arabic, Hebrew, Turkish
-- **And 150+ more**
-
-## Limitations
-
-1. **Very short text (<2 chars):** Marked as `unknown`, `is_short=True`
-2. **Numeric-only:** Marked as `unknown`, `is_numeric=True`
-3. **Mixed scripts:** May favor dominant script (e.g., "STOP 停" → Chinese)
-4. **Confidence != Accuracy:** Use 0.3+ threshold for reasonable predictions
-
-## Recommendations for Production
-
-1. ✅ **Load model once** at application startup (not per request)
-2. ✅ **Reuse detector instance** across all requests
-3. ✅ **Set confidence threshold** to 0.3+ for filtering low-quality predictions
-4. ✅ **Handle special cases:**
-   - Filter numeric-only text (`is_numeric=True`)
-   - Handle very short text (`is_short=True`)
-5. ✅ **Monitor predictions** - log low-confidence detections for review
-
-## Example: Filtering Strategy
+### Filtering Strategy
 
 ```python
 result = detector.detect(text)
@@ -115,24 +67,102 @@ else:
     language = result['language']
 ```
 
-## Benchmarks
+### Recommendations
 
-Run benchmarks anytime:
+1. **Load model once** at application startup (not per request)
+2. **Reuse detector instance** across all requests
+3. **Set confidence threshold** to 0.3+ for filtering low-quality predictions
+4. **Handle special cases:** filter `is_numeric=True` and `is_short=True` results
+
+## Files
+
+- **[language_detector.py](language_detector.py)** — Production module (optimized, clean API)
+- **[add_language_fasttext.py](add_language_fasttext.py)** — Batch processing script for CSVs
+- **[benchmark_language_detection.py](benchmark_language_detection.py)** — Latency benchmarks
+- **[compare_language_models.py](compare_language_models.py)** — fastText vs lingua-py comparison
+- **lid.176.bin** — fastText model (125MB, gitignored, auto-downloaded on first run)
+
+## Model Download
+
+The model is auto-downloaded on first run. To download manually:
+
+```bash
+wget https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
+# or
+curl -O https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
+```
+
+Place the file in `scripts/mapillary/` (same directory as the scripts).
+
+## Supported Languages
+
+176 languages including:
+- **Western:** English, Spanish, French, German, Italian, Portuguese
+- **Eastern:** Chinese, Japanese, Korean, Thai, Vietnamese
+- **European:** Russian, Polish, Czech, Swedish, Norwegian, Danish
+- **Middle Eastern:** Arabic, Hebrew, Turkish
+
+## Dataset Results
+
+Processed 121,238 traffic signs with detected text from 302,999 total rows:
+
+- **70,359 detections** (58% had confident predictions)
+
+### Top Languages
+
+| Language | Count | % of detections | Avg Confidence |
+|----------|-------|-----------------|----------------|
+| English (en) | 27,358 | 22.6% | 0.465 |
+| Japanese (ja) | 8,052 | 6.6% | 0.549 |
+| French (fr) | 6,989 | 5.8% | 0.276 |
+| German (de) | 6,329 | 5.2% | 0.430 |
+| Chinese (zh) | 5,424 | 4.5% | 0.638 |
+| Spanish (es) | 2,849 | 2.4% | 0.384 |
+| Danish (da) | 2,716 | 2.2% | 0.208 |
+| Italian (it) | 1,736 | 1.4% | 0.440 |
+| Portuguese (pt) | 1,045 | 0.9% | 0.406 |
+| Russian (ru) | 970 | 0.8% | 0.343 |
+
+### Confidence Distribution
+
+| Range | Count | % |
+|-------|-------|---|
+| 0.0 – 0.5 | 43,094 | 61.3% |
+| 0.5 – 0.7 | 15,902 | 22.6% |
+| 0.7 – 0.9 | 6,438 | 9.2% |
+| 0.9 – 1.0 | 4,624 | 6.6% |
+
+Mean: 0.440 · Median: 0.383 · High confidence (>0.9): 4,925 (6.6%)
+
+### Numeric Text Note
+
+25,925 numeric-only texts (e.g., "35", "520") were detected. Numbers don't carry
+language information so results are unreliable — 40.5% marked unknown, the rest
+assigned low-confidence predictions. Always filter with `is_numeric=True`.
+
+## Limitations
+
+1. **Very short text (<2 chars):** Marked as `unknown`, `is_short=True`
+2. **Numeric-only:** Marked as `unknown`, `is_numeric=True`
+3. **Mixed scripts:** May favor dominant script (e.g., "STOP 停" → Chinese)
+4. **Confidence != Accuracy:** Use 0.3+ threshold for reasonable predictions
+
+## Troubleshooting
+
+### fasttext Installation Issues
+
+```bash
+pip install fasttext-wheel   # usually more compatible
+# if that fails:
+pip install fasttext          # builds from source
+```
+
+On macOS Apple Silicon, ensure you're using Python 3.9+.
+
+### Benchmarks
 
 ```bash
 python benchmark_language_detection.py
 ```
 
-Expected output:
-- Single inference: ~0.01ms (p50)
-- Batch of 100: ~0.01ms per item
-- Throughput: >100k predictions/sec
-
-## Dataset Results
-
-Processed 121,238 traffic signs with detected text:
-- **70,359 detections** (58% had confident predictions)
-- **Top languages:** English (22.6%), Japanese (6.6%), French (5.8%), German (5.2%)
-- **High confidence (>0.9):** 4,925 detections (perfect Chinese/Japanese, clear text)
-
-See [README_language_detection.md](README_language_detection.md) for detailed dataset statistics.
+Expected: ~0.01ms per item, >100k predictions/sec.

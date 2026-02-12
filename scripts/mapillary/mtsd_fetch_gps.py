@@ -62,7 +62,7 @@ def fetch_gps_batch(image_keys, token):
         dict: {image_key: (lat, lon)} for keys that returned data
     """
     ids = ",".join(image_keys)
-    url = f"{MAPILLARY_API}?ids={ids}&fields=id,computed_geometry"
+    url = f"{MAPILLARY_API}/images?ids={ids}&fields=id,computed_geometry"
     headers = {"Authorization": f"OAuth {token}"}
     try:
         resp = requests.get(url, headers=headers, timeout=30)

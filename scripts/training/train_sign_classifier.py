@@ -168,7 +168,7 @@ def run_epoch(model, loader, criterion, optimizer, device, train=True, desc=""):
 
 def main():
     parser = argparse.ArgumentParser(description="Train MTSD sign classifier")
-    parser.add_argument("--backbone",   default="efficientnet_b2",
+    parser.add_argument("--backbone",   default="efficientnet_b0",
                         choices=["efficientnet_b0", "efficientnet_b2", "mobilenet_v3_small"])
     parser.add_argument("--epochs",     type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
