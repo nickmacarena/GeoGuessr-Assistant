@@ -4,6 +4,29 @@ Running log of work done, updated with each meaningful push.
 
 ---
 
+## 2026-02-20 — YOLOv8 Sign Detector Training (Kaggle)
+
+### What we built
+- **Kaggle training notebook** (`scripts/training/kaggle_train_detector.ipynb`)
+  - Trains YOLOv8n binary sign detector on MTSD via Kaggle T4 GPU
+  - Converts MTSD annotations → YOLO format labels (Cell 3)
+  - Monkey-patches ultralytics label resolution to handle Kaggle's read-only input paths (Cell 5)
+  - **Best mAP50: 61.2%** after 25 epochs on ~17k train images
+  - Outputs `yolov8n_mtsd_best.pt` → saved to `GGAI/models/sign_detector/yolov8n_mtsd/best_model.pt`
+
+- **Kaggle CLI workflow** established for pulling outputs locally:
+  - `kaggle kernels output burtsbeezer/notebook4195d7ce95 -p <dest>`
+  - Updated Cell 7 to copy results files to `/kaggle/working/` so they're API-accessible
+
+### Key findings
+- Newer ultralytics auto-downloaded `yolo26n.pt` (YOLO v2.6n) as base weights instead of `yolov8n.pt`; 319/355 layers transferred
+- Kaggle API only exposes top-level `/kaggle/working/` files — subdirectories like `runs/` are not accessible; fixed in notebook
+
+### Results saved
+- `GGAI/models/sign_detector/yolov8n_mtsd/results/` — training curves, confusion matrix, val predictions, args, metrics CSV
+
+---
+
 ## 2026-02-11 — Sign Classifier + GPS Investigation
 
 ### What we built
@@ -32,6 +55,25 @@ Running log of work done, updated with each meaningful push.
 `{category}--{type}--{variant}` e.g. `regulatory--stop--g1`
 - Variant numbers (g1, g2, g25) are arbitrary IDs for visually distinct regional designs
 - Reference SVGs: `https://github.com/mapillary/mapillary_sprite_source/blob/master/package_signs/{label}.svg`
+
+---
+
+## 2026-02-11 — Project Reorganization + Road Line Exploration
+
+### Reorganization
+- Moved all processing scripts from `data/mapillary/` → `scripts/mapillary/` (separation of code from data)
+- Added `.env` / `.env.example` for Mapillary API token storage
+
+### Sign country distribution
+- Built `scripts/mapillary/build_sign_country_dist.py` + `country_bboxes.json`
+- Computes per-country sign type frequency from MTSD GPS metadata
+- Outputs `GGAI/data/sign_country_dist.json` — used for region scoring at inference time
+
+### Road line color classification (explored, not kept)
+- Explored detecting road markings (white/yellow lines) as a geolocation signal on a feature branch
+- Built detection + color classification pipeline (`detect_road_markings.py`, `classify_road_lines.py`)
+- **Abandoned:** too noisy, inconsistent across lighting/weather, weak geo-signal compared to signs
+- Branch merged but scripts removed; approach documented here for reference
 
 ---
 
