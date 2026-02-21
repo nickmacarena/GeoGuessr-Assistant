@@ -25,6 +25,14 @@ Running log of work done, updated with each meaningful push.
 ### Results saved
 - `GGAI/models/sign_detector/yolov8n_mtsd/results/` — training curves, confusion matrix, val predictions, args, metrics CSV
 
+- **End-to-end inference script** (`scripts/training/detect_and_classify.py`)
+  - Chains YOLOv8 detector → EfficientNet-B0 classifier on a single street-view image
+  - Outputs annotated JPEG with bounding boxes, top-3 sign predictions, and confidence %
+  - Auto-selects device (MPS → CUDA → CPU); configurable `--conf`, `--iou`, `--top-k`
+  - Usage: `python detect_and_classify.py --image <path>`
+
+- **`requirements.txt`** added with core deps: `torch`, `torchvision`, `ultralytics`, `pillow`
+
 ---
 
 ## 2026-02-11 — Sign Classifier + GPS Investigation
