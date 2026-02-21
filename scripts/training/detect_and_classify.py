@@ -32,7 +32,7 @@ import numpy as np
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 REPO_ROOT        = Path(__file__).parent.parent.parent
-DETECTOR_PATH    = REPO_ROOT / "GGAI" / "models" / "sign_detector" / "yolov8n_mtsd" / "weights" / "best.pt"
+DETECTOR_PATH    = REPO_ROOT / "GGAI" / "models" / "sign_detector" / "yolov8n_mtsd" / "best_model.pt"
 CLASSIFIER_PATH  = REPO_ROOT / "GGAI" / "models" / "sign_classifier" / "best_model.pt"
 LABEL_MAP_PATH   = REPO_ROOT / "GGAI" / "models" / "sign_classifier" / "label_map.json"
 

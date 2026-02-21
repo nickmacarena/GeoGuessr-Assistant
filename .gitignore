@@ -2,13 +2,20 @@
 data/mapillary/full_ds/
 data/mapillary/crops/
 data/mapillary/sample_ds/
+data/mapillary/data/
+data/mapillary/debug_viz/
+data/mapillary/debug_viz_yellow/
+data/mapillary/visualizations/
+data/mapillary/yolo_detection/
 data/mapillary/*.csv
+data/mapillary/*.json
 data/mapillary/venv*/
 data/mapillary/*.zip
 
 # Language detection models (large files)
 data/mapillary/lid.176.bin
 data/mapillary/*.ftz
+data/mapillary/*.bin
 
 # Keep the scripts and documentation
 !data/mapillary/mtsd_helper/
@@ -25,6 +32,7 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 env/
 ENV/
 *.egg-info/
