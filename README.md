@@ -16,8 +16,6 @@
 
 Full pipeline on unseen validation images: original → detected → classified crop → reference icon.
 
-![US suburban demo](assets/demo_us_dusk.png)
-
 ![AU/NZ road demo](assets/demo_aunz_road.png)
 
 ---
