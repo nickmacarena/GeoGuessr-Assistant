@@ -4,6 +4,36 @@ Running log of work done, updated with each meaningful push.
 
 ---
 
+## 2026-03-19 — Mapillary Sign Collection Pipeline
+
+### What we built
+- **City/bbox configuration** (`scripts/mapillary/cities.py`)
+  - 58 cities across 35 countries, organized by region (Europe, Americas, Asia, Oceania, Africa, Middle East)
+  - Each city defines center coords + grid radius (~10km×10km area → ~100 tiles per city)
+
+- **Map features collection script** (`scripts/mapillary/collect_signs.py`)
+  - Queries Mapillary `map_features` API for traffic signs in tiled bboxes (<0.01° each)
+  - Filters results to only our classifier's 400 known sign classes (via `label_map.json`)
+  - Deduplicates by feature ID across overlapping tiles
+  - Offline reverse geocoding via `reverse_geocoder` (lat/lon → country code, no API calls)
+  - Outputs single CSV: `feature_id, lat, lon, sign_class, country, city`
+  - Supports `--test` (one tile), `--city <name>`, `--all`, and `--resume` modes
+  - Rate limiting + retry on 429
+
+- **Mapillary API test script** (`scripts/mapillary/test_api.py`)
+  - Validates search API (bbox image queries) and entity API (thumbnail URLs)
+  - Confirmed API working with SF bbox; Paris bbox too small for coverage
+
+- **Pipeline demo visualizations** (`GGAI/models/pipeline_demo*.png`)
+  - 4-panel images: original street view → detected signs → classified crops → reference SVG icons
+
+### Key findings
+- Mapillary's API taxonomy includes ~55 classes per tile, but only ~19 match our 400-class label map (construction barriers, road markings, traffic lights filtered out)
+- Berlin test tile returned 344 features, reverse geocoded correctly to DE
+- Coverage varies widely by region — need large bboxes for sparser areas
+
+---
+
 ## 2026-02-20 — YOLOv8 Sign Detector Training (Kaggle)
 
 ### What we built
