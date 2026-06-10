@@ -20,6 +20,7 @@ import base64
 import html
 import io
 import json
+import sys
 from pathlib import Path
 
 import cv2
@@ -39,6 +40,7 @@ CLASSIFIER_PATH = REPO_ROOT / "GGAI" / "models" / "sign_classifier" / "best_mode
 LABEL_MAP_PATH  = REPO_ROOT / "GGAI" / "models" / "sign_classifier" / "label_map.json"
 REGION_MAP_PATH = REPO_ROOT / "GGAI" / "models" / "sign_classifier" / "region_mapping.json"
 LANE_MODEL_PATH = REPO_ROOT / "GGAI" / "models" / "lane_segmentation_v4" / "best_model.pt"
+GEO_MODEL_PATH  = REPO_ROOT / "GGAI" / "models" / "geo_classifier" / "sign_country_model.json"
 
 CLASSIFIER_IMG_SIZE = 96
 
@@ -109,6 +111,43 @@ LANE_BOX_COLORS = {
 }
 
 SIGN_BOX_COLOR = "#e74c3c"
+TEXT_BOX_COLOR = "#2ecc71"
+
+# Language → countries where it's the (or a major) road-sign language
+LANG_COUNTRIES = {
+    "en": ["US", "GB", "CA", "AU", "NZ", "ZA", "IE", "IN", "MY", "KE", "NG"],
+    "es": ["ES", "MX", "CO", "CL", "AR", "PE"],
+    "pt": ["PT", "BR"],
+    "de": ["DE", "AT", "CH"],
+    "fr": ["FR", "BE", "CH", "CA (Québec)"],
+    "it": ["IT", "CH"],
+    "nl": ["NL", "BE"],
+    "sv": ["SE", "FI"],
+    "da": ["DK"],
+    "no": ["NO"], "nn": ["NO"],
+    "fi": ["FI"],
+    "is": ["IS"],
+    "pl": ["PL"], "cs": ["CZ"], "sk": ["SK"], "hu": ["HU"], "ro": ["RO"],
+    "hr": ["HR"], "sh": ["HR", "RS", "BA", "ME"], "bs": ["BA"],
+    "sl": ["SI"], "sr": ["RS", "BA", "ME"], "bg": ["BG"], "el": ["GR"],
+    "tr": ["TR"], "et": ["EE"], "lv": ["LV"], "lt": ["LT"],
+    "ru": ["RU", "BY", "KZ"], "uk": ["UA"],
+    "ja": ["JP"], "ko": ["KR"], "zh": ["TW", "CN", "SG", "MY"],
+    "th": ["TH"], "vi": ["VN"], "id": ["ID"], "ms": ["MY"],
+    "he": ["IL"], "ar": ["AE", "SA", "MA", "EG", "JO"],
+    "af": ["ZA"], "tl": ["PH"], "ca": ["ES (Catalonia)"],
+}
+
+# Text/language pipeline is optional: Vision needs macOS, fastText needs lid.176.bin.
+# OCR runs in a subprocess — Vision SIGBUSes if invoked in a process with torch/MPS.
+TEXT_DETECTOR_SCRIPT = Path(__file__).parent / "text_detector.py"
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "mapillary"))
+try:
+    from language_detector import LanguageDetector
+    TEXT_PIPELINE_AVAILABLE = (sys.platform == "darwin"
+                               and TEXT_DETECTOR_SCRIPT.exists())
+except Exception:
+    TEXT_PIPELINE_AVAILABLE = False
 
 SEG_IMG_SIZE = (512, 256)            # (W, H) — must match training
 MIN_COMPONENT_AREA = 50              # px in seg-mask space (matches presence threshold)
@@ -156,8 +195,20 @@ def classify_crop(model, crop_img, idx2label, device, k=3):
     return [(idx2label[str(i.item())], p.item()) for i, p in zip(top_idxs, top_probs)]
 
 
+def sign_country_probs(country_model, sign_class, k=5):
+    """P(country | single sign class) under uniform prior. Top-k (country, prob)."""
+    ll = country_model["log_lik"].get(sign_class)
+    if ll is None:
+        return None
+    mx = max(ll.values())
+    exp = {c: np.exp(v - mx) for c, v in ll.items()}
+    total = sum(exp.values())
+    ranked = sorted(exp, key=exp.get, reverse=True)[:k]
+    return [(c, exp[c] / total) for c in ranked]
+
+
 def detect_signs(image_path, image, detector, classifier, idx2label, region_map,
-                 device, conf, iou, top_k):
+                 device, conf, iou, top_k, country_model=None):
     """Run detector + classifier; return list of sign detection dicts."""
     img_w, img_h = image.size
     results = detector(str(image_path), conf=conf, iou=iou, verbose=False)
@@ -175,12 +226,15 @@ def detect_signs(image_path, image, detector, classifier, idx2label, region_map,
 
         top_label  = preds[0][0]
         regions    = region_map.get(top_label, {}).get("regions", [])
+        country_probs = (sign_country_probs(country_model, top_label)
+                         if country_model else None)
 
         detections.append({
-            "box":      (x1, y1, x2, y2),
-            "det_conf": float(det_conf),
-            "preds":    preds,
-            "regions":  regions,
+            "box":           (x1, y1, x2, y2),
+            "det_conf":      float(det_conf),
+            "preds":         preds,
+            "regions":       regions,
+            "country_probs": country_probs,
         })
     return detections
 
@@ -241,6 +295,104 @@ def detect_lanes(image, lane_model, ckpt, device):
     return detections
 
 
+# ── Text pipeline ─────────────────────────────────────────────────────────────
+
+# Vision OCR confidence is tiered, not calibrated: ~1.0 = perfect head-on
+# text, ~0.5 = legible but angled/stylized (most real signage), ~0.3 =
+# marginal. 0.5 therefore means "legible"; 0.9 would hide most real text.
+DEFAULT_TEXT_CONF = 0.5   # OCR confidence threshold for showing a text block
+OCR_FLOOR = 0.3           # lines above this are collected for block merging
+
+
+def merge_text_lines(lines):
+    """Group vertically-adjacent, horizontally-aligned OCR lines into blocks.
+
+    Vision OCR returns one observation per visual line, so a sentence laid
+    out vertically (billboards, multi-line signs) arrives as fragments that
+    are individually too short for reliable language ID. Merged blocks give
+    fastText full-sentence context.
+
+    Block membership: next line starts within 1.2× current line height below,
+    and the two lines overlap horizontally by ≥30% of the narrower line.
+    Returns blocks: {box, conf (max of members), text (joined), n_lines}.
+    """
+    lines = sorted(lines, key=lambda r: (r["box"][1], r["box"][0]))
+    blocks = []
+
+    for line in lines:
+        x1, y1, x2, y2 = line["box"]
+        placed = False
+        for blk in blocks:
+            bx1, by1, bx2, by2 = blk["box"]
+            line_h = max(y2 - y1, 1)
+            blk_line_h = max(blk["last_line_h"], 1)
+            v_gap = y1 - by2
+            overlap = min(x2, bx2) - max(x1, bx1)
+            min_w = max(min(x2 - x1, bx2 - bx1), 1)
+            if (v_gap <= 1.2 * max(line_h, blk_line_h)
+                    and overlap >= 0.3 * min_w):
+                blk["box"] = (min(bx1, x1), min(by1, y1),
+                              max(bx2, x2), max(by2, y2))
+                blk["texts"].append(line["text"])
+                blk["conf"] = max(blk["conf"], line["conf"])
+                blk["last_line_h"] = line_h
+                placed = True
+                break
+        if not placed:
+            blocks.append({
+                "box": tuple(line["box"]),
+                "texts": [line["text"]],
+                "conf": line["conf"],
+                "last_line_h": y2 - y1,
+            })
+
+    return [{"box": b["box"], "conf": b["conf"],
+             "text": " ".join(b["texts"]), "n_lines": len(b["texts"])}
+            for b in blocks]
+
+
+def detect_texts(image_path, lang_detector, min_conf=DEFAULT_TEXT_CONF):
+    """OCR via subprocess (Vision can't share a process with torch/MPS),
+    merge lines into blocks, then run language ID per block in-process.
+
+    Lines are collected down to OCR_FLOOR so multi-line sentences merge
+    whole; only blocks whose best line reaches min_conf are shown.
+    """
+    import os
+    import subprocess
+
+    # Strip DYLD_LIBRARY_PATH: homebrew dylibs shadow the system image
+    # libraries Vision needs, silently breaking OCR
+    env = {k: v for k, v in os.environ.items() if k != "DYLD_LIBRARY_PATH"}
+    proc = subprocess.run(
+        [sys.executable, str(TEXT_DETECTOR_SCRIPT), str(image_path),
+         "--json", "--min-conf", str(min(OCR_FLOOR, min_conf))],
+        capture_output=True, text=True, timeout=60, env=env)
+    if proc.returncode != 0:
+        print(f"  OCR subprocess failed: {proc.stderr.strip()[:200]}")
+        return []
+    ocr_results = json.loads(proc.stdout)
+
+    blocks = merge_text_lines(ocr_results)
+    blocks = [b for b in blocks if b["conf"] >= min_conf]
+
+    detections = []
+    for b in blocks:
+        lang = lang_detector.detect(b["text"])
+        top_langs = [(lang_detector.get_language_name(t["language"]),
+                      t["confidence"]) for t in lang["top_languages"]]
+        detections.append({
+            "box":       b["box"],
+            "ocr_conf":  b["conf"],
+            "text":      b["text"],
+            "n_lines":   b["n_lines"],
+            "lang":      lang,
+            "lang_name": lang_detector.get_language_name(lang["language"]),
+            "top_langs": top_langs,
+        })
+    return detections
+
+
 # ── HTML rendering ────────────────────────────────────────────────────────────
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -261,37 +413,66 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     position: absolute; border: 2px solid; border-radius: 2px;
     box-sizing: border-box; cursor: crosshair;
   }}
-  .det:hover {{ background: rgba(255, 255, 255, 0.12); z-index: 50; }}
-  .det .tip {{
-    display: none; position: absolute; left: 0; top: 100%; margin-top: 4px;
+  .det:hover {{ background: rgba(255, 255, 255, 0.12); }}
+  .det .tip-src {{ display: none; }}
+  #gtip {{
+    display: none; position: absolute;
     background: rgba(12, 12, 24, 0.96); border: 1px solid #555; border-radius: 6px;
-    padding: 10px 12px; min-width: 260px; max-width: 380px; z-index: 100;
+    padding: 10px 12px; min-width: 260px; max-width: 380px; z-index: 99999;
     font-size: 12.5px; line-height: 1.5; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    pointer-events: none;
   }}
-  .det:hover .tip {{ display: block; }}
-  .det.flip .tip {{ top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }}
-  .tip h3 {{ margin: 0 0 6px; font-size: 13px; }}
-  .tip .conf {{ color: #8fd; }}
-  .tip .countries {{ color: #ffd700; }}
-  .tip .note {{ color: #aaa; font-style: italic; margin-top: 6px; }}
-  .tip ul {{ margin: 4px 0; padding-left: 16px; }}
+  #gtip h3 {{ margin: 0 0 6px; font-size: 13px; }}
+  #gtip .conf {{ color: #8fd; }}
+  #gtip .countries {{ color: #ffd700; }}
+  #gtip .note {{ color: #aaa; font-style: italic; margin-top: 6px; }}
+  #gtip ul {{ margin: 4px 0; padding-left: 16px; }}
+  #gtip .cbar {{ display: flex; align-items: center; gap: 6px; margin: 2px 0; }}
+  #gtip .cname {{ width: 28px; font-weight: 600; }}
+  #gtip .bar {{ height: 8px; background: #ffd700; border-radius: 2px; display: inline-block; }}
+  #gtip .cpct {{ color: #8fd; }}
 </style>
 </head>
 <body>
 <h1>Geo Inspector — {title}</h1>
 <div class="legend">
-  {n_signs} sign(s) · {n_lanes} lane line(s) — hover any box for classification + country likelihood
+  {legend} — hover any box for classification + country likelihood
 </div>
 <div class="stage">
   <img src="data:image/jpeg;base64,{img_b64}" width="{img_w}" height="{img_h}">
 {boxes}
 </div>
+<div id="gtip"></div>
+{script}
 </body>
 </html>
 """
 
-BOX_TEMPLATE = """  <div class="det{flip}" style="left:{l:.2f}%;top:{t:.2f}%;width:{w:.2f}%;height:{h:.2f}%;border-color:{color};">
-    <div class="tip">{tip}</div>
+# Single page-level tooltip: boxes keep area-sorted z-index for hit-testing
+# (small inside big stays hoverable) and never get raised, while the tooltip
+# always paints on top. Kept out of HTML_TEMPLATE so str.format doesn't
+# require brace-escaping the JS.
+TOOLTIP_SCRIPT = """<script>
+const gtip = document.getElementById('gtip');
+document.querySelectorAll('.det').forEach(d => {
+  d.addEventListener('mouseenter', () => {
+    gtip.innerHTML = d.querySelector('.tip-src').innerHTML;
+    const r = d.getBoundingClientRect();
+    gtip.style.display = 'block';
+    gtip.style.left = Math.max(8, Math.min(r.left + window.scrollX,
+      window.scrollX + window.innerWidth - gtip.offsetWidth - 16)) + 'px';
+    let top = r.bottom + window.scrollY + 4;
+    if (r.bottom + gtip.offsetHeight + 8 > window.innerHeight) {
+      top = r.top + window.scrollY - gtip.offsetHeight - 4;
+    }
+    gtip.style.top = Math.max(window.scrollY + 4, top) + 'px';
+  });
+  d.addEventListener('mouseleave', () => { gtip.style.display = 'none'; });
+});
+</script>"""
+
+BOX_TEMPLATE = """  <div class="det" style="left:{l:.2f}%;top:{t:.2f}%;width:{w:.2f}%;height:{h:.2f}%;border-color:{color};z-index:{z};">
+    <div class="tip-src">{tip}</div>
   </div>
 """
 
@@ -309,20 +490,30 @@ def sign_tooltip(det):
         rows.append(f"<li>{marker}{html.escape(label)} "
                     f"<span class='conf'>{conf:.0%}</span></li>")
 
-    regions = det["regions"]
-    if regions:
-        region_lines = [f"<li>{html.escape(SIGN_REGION_COUNTRIES.get(r, r))}</li>"
-                        for r in regions]
-        region_html = ("<div class='countries'>Used in:</div><ul>"
-                       + "".join(region_lines) + "</ul>")
-        if set(regions) == {"us", "eu"}:
-            region_html += ("<div class='note'>Design used in both US and EU "
-                            "sign systems — weak geo signal.</div>")
+    if det.get("country_probs"):
+        bars = []
+        for country, p in det["country_probs"]:
+            barw = max(2, int(p * 100))
+            bars.append(
+                f"<div class='cbar'><span class='cname'>{html.escape(country)}</span>"
+                f"<span class='bar' style='width:{barw}px'></span>"
+                f"<span class='cpct'>{p:.0%}</span></div>")
+        geo_html = ("<div class='countries'>Country likelihood (this sign alone):</div>"
+                    + "".join(bars))
     else:
-        region_html = "<div class='note'>No region data for this sign design.</div>"
+        regions = det["regions"]
+        if regions:
+            region_lines = [f"<li>{html.escape(SIGN_REGION_COUNTRIES.get(r, r))}</li>"
+                            for r in regions]
+            geo_html = ("<div class='countries'>Used in:</div><ul>"
+                        + "".join(region_lines) + "</ul>"
+                        "<div class='note'>No training data for this sign — "
+                        "showing design regions instead.</div>")
+        else:
+            geo_html = "<div class='note'>No geo data for this sign design.</div>"
 
     return (f"<h3>🛑 Traffic sign <span class='conf'>(det {det['det_conf']:.0%})</span></h3>"
-            f"<ul>{''.join(rows)}</ul>{region_html}")
+            f"<ul>{''.join(rows)}</ul>{geo_html}")
 
 
 def lane_tooltip(det):
@@ -337,33 +528,89 @@ def lane_tooltip(det):
             f"<div class='note'>{html.escape(info['note'])}</div>")
 
 
-def render_html(image, sign_dets, lane_dets, title):
+def text_tooltip(det):
+    lang = det["lang"]
+    lines_note = (f" · {det['n_lines']} lines merged"
+                  if det.get("n_lines", 1) > 1 else "")
+    header = (f"<h3>📝 Text <span class='conf'>(OCR {det['ocr_conf']:.0%}"
+              f"{lines_note})</span></h3>"
+              f"<div>&ldquo;{html.escape(det['text'])}&rdquo;</div>")
+
+    if lang["is_numeric"]:
+        return header + "<div class='note'>Numbers only — no language signal.</div>"
+    if lang["is_short"]:
+        return header + "<div class='note'>Too short for reliable language ID.</div>"
+
+    top_langs = det.get("top_langs", [])
+    tops_html = " · ".join(
+        f"<b>{html.escape(name)}</b> <span class='conf'>{conf:.0%}</span>"
+        for name, conf in top_langs)
+
+    if lang.get("constrained"):
+        chars = ", ".join(lang.get("diacritics", []))
+        constraint_html = (f"<div class='note'>Alphabet constraint active: "
+                           f"&lsquo;{html.escape(chars)}&rsquo; — only languages "
+                           f"whose alphabet has these characters considered.</div>")
+    else:
+        constraint_html = ""
+
+    if lang["language"] == "unknown":
+        weak = (f"<div class='note'>Weak guesses: {tops_html}</div>"
+                if top_langs else "")
+        return (header + "<div class='note'>Language unclear "
+                "(below confidence threshold).</div>" + weak + constraint_html)
+
+    countries = LANG_COUNTRIES.get(lang["language"])
+    if countries:
+        country_html = (f"<div class='countries'>Likely: "
+                        f"{html.escape(', '.join(countries))}</div>")
+    else:
+        country_html = ""
+    return (header
+            + f"<div>Language: {tops_html} "
+              f"<span class='note'>(script: {html.escape(lang['script'])})</span></div>"
+            + country_html + constraint_html)
+
+
+def render_html(image, sign_dets, lane_dets, title, text_dets=None):
     img_w, img_h = image.size
+    text_dets = text_dets or []
 
     buf = io.BytesIO()
     image.save(buf, format="JPEG", quality=88)
     img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-    boxes = []
+    entries = []
     for det in sign_dets:
-        l, t, w, h = pct_box(det["box"], img_w, img_h)
-        flip = " flip" if t + h > 75 else ""
-        boxes.append(BOX_TEMPLATE.format(
-            flip=flip, l=l, t=t, w=w, h=h,
-            color=SIGN_BOX_COLOR, tip=sign_tooltip(det)))
-
+        entries.append((det["box"], SIGN_BOX_COLOR, sign_tooltip(det)))
     for det in lane_dets:
-        l, t, w, h = pct_box(det["box"], img_w, img_h)
-        flip = " flip" if t + h > 75 else ""
+        entries.append((det["box"], LANE_BOX_COLORS[det["class"]], lane_tooltip(det)))
+    for det in text_dets:
+        entries.append((det["box"], TEXT_BOX_COLOR, text_tooltip(det)))
+
+    # Smaller boxes stack above larger ones so nested detections (e.g. text
+    # inside a sign) stay hoverable
+    def area(box):
+        x1, y1, x2, y2 = box
+        return (x2 - x1) * (y2 - y1)
+
+    entries.sort(key=lambda e: area(e[0]), reverse=True)
+
+    boxes = []
+    for z, (box, color, tip) in enumerate(entries, start=10):
+        l, t, w, h = pct_box(box, img_w, img_h)
         boxes.append(BOX_TEMPLATE.format(
-            flip=flip, l=l, t=t, w=w, h=h,
-            color=LANE_BOX_COLORS[det["class"]], tip=lane_tooltip(det)))
+            l=l, t=t, w=w, h=h, color=color, tip=tip, z=z))
+
+    legend = (f"{len(sign_dets)} sign(s) · {len(lane_dets)} lane line(s)"
+              + (f" · {len(text_dets)} text region(s)" if text_dets else ""))
 
     return HTML_TEMPLATE.format(
         title=html.escape(title), img_b64=img_b64,
         img_w=img_w, img_h=img_h,
-        n_signs=len(sign_dets), n_lanes=len(lane_dets),
-        boxes="".join(boxes))
+        legend=legend,
+        boxes="".join(boxes),
+        script=TOOLTIP_SCRIPT)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -376,9 +623,12 @@ def main():
     parser.add_argument("--label-map",  default=str(LABEL_MAP_PATH))
     parser.add_argument("--region-map", default=str(REGION_MAP_PATH))
     parser.add_argument("--lane-model", default=str(LANE_MODEL_PATH))
+    parser.add_argument("--geo-model",  default=str(GEO_MODEL_PATH))
     parser.add_argument("--conf",       type=float, default=0.3)
     parser.add_argument("--iou",        type=float, default=0.45)
     parser.add_argument("--top-k",      type=int, default=3)
+    parser.add_argument("--text-conf",  type=float, default=DEFAULT_TEXT_CONF,
+                        help="OCR confidence threshold for text boxes")
     parser.add_argument("--out",        default=None,
                         help="Output HTML path (default: <input>_inspector.html)")
     args = parser.parse_args()
@@ -409,11 +659,18 @@ def main():
     with open(args.region_map) as f:
         region_map = json.load(f)
 
+    country_model = None
+    if Path(args.geo_model).exists():
+        with open(args.geo_model) as f:
+            country_model = json.load(f)
+        print(f"Loaded geo model:   {args.geo_model}")
+
     image = Image.open(image_path).convert("RGB")
 
     print(f"\nRunning sign pipeline on {image_path.name}...")
     sign_dets = detect_signs(image_path, image, detector, classifier, idx2label,
-                             region_map, device, args.conf, args.iou, args.top_k)
+                             region_map, device, args.conf, args.iou, args.top_k,
+                             country_model=country_model)
     print(f"  {len(sign_dets)} sign(s)")
     for i, d in enumerate(sign_dets):
         label, conf = d["preds"][0]
@@ -425,7 +682,20 @@ def main():
     for d in lane_dets:
         print(f"  {d['class']:18s} area={d['area']} box={d['box']}")
 
-    html_doc = render_html(image, sign_dets, lane_dets, image_path.name)
+    text_dets = []
+    if TEXT_PIPELINE_AVAILABLE:
+        print(f"\nRunning text pipeline...")
+        lang_detector = LanguageDetector()
+        text_dets = detect_texts(image_path, lang_detector, min_conf=args.text_conf)
+        print(f"  {len(text_dets)} text region(s)")
+        for d in text_dets:
+            print(f"  {d['text']!r} → {d['lang']['language']} "
+                  f"({d['lang']['confidence']:.0%})")
+    else:
+        print("\nText pipeline unavailable (needs macOS Vision + fasttext) — skipping.")
+
+    html_doc = render_html(image, sign_dets, lane_dets, image_path.name,
+                           text_dets=text_dets)
     out_path.write_text(html_doc)
     print(f"\nSaved inspector → {out_path}")
     print(f"Open with: open '{out_path}'")

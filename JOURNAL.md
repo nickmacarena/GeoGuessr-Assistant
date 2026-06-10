@@ -4,6 +4,31 @@ Running log of work done, updated with each meaningful push.
 
 ---
 
+## 2026-06-10 — Sign→Country Classifier, Live GeoGuessr Companion, Text/Language Pipeline
+
+### What we built
+- **Sign→country Naive Bayes classifier** (`scripts/training/train_geo_classifier.py`)
+  - Groups 154k collected Mapillary signs into 59,617 ~100m grid-cell "scenes", fits multinomial NB over sign-class counts
+  - Held-out accuracy (44 countries, no prior): top-1 33% / top-5 67% overall; **69% top-1 / 91% top-5 for scenes with 10+ signs** (chance = 2.3%)
+  - Model is pure JSON (`GGAI/models/geo_classifier/sign_country_model.json`) — per-class log-likelihoods, no torch at inference
+- **Live GeoGuessr companion** (`scripts/training/geo_live.py`)
+  - Daemon: loads all models once, watches `~/Desktop` for screenshots, serves auto-updating inspector at `localhost:8077`
+  - Play flow: Cmd-Shift-3/4 during a round → annotated result in ~3-5s, hover boxes for evidence
+- **Text/language pipeline** (`scripts/training/text_detector.py` + upgraded `language_detector.py`)
+  - OCR via macOS Vision (subprocess — Vision SIGBUSes in-process with torch/MPS; DYLD_LIBRARY_PATH must be stripped)
+  - Vertically-adjacent OCR lines merge into blocks before language ID (billboards arrive line-by-line otherwise)
+  - **Diacritic constraint filter**: ~50 diagnostic chars (č, ő, ı, þ, ă…) restrict candidates to languages whose alphabet matches; confidences renormalized over survivors; probability-mass guard (<15%) backs off on phantom OCR diacritics
+  - Sign tooltips show learned per-sign country likelihoods from the NB model; text tooltips show top-3 languages
+- **Inspector UX** (`geo_inspector.py`): boxes z-ordered by area + single page-level JS tooltip so nested detections stay hoverable; `--text-conf` flag (default 0.5 — Vision confidence is tiered ~1.0/0.5/0.3, not calibrated)
+
+### Key findings
+- mIoU-style intuition repeated for languages: fastText is case-sensitive — ALL-CAPS signage text degrades badly, lowercase before predicting
+- fastText often prefers `sh`/`sr` (Latin Serbian) for Croatian text; they're near-inseparable on sign-length text — diacritic note signals "former Yugoslavia" which is the realistic ceiling
+- Renormalizing over a constraint's lone survivor can inflate a 0.5% candidate to 100% — phantom OCR diacritics (ă→ä) make this a real failure mode; the mass guard bounds it
+- `python3` on this machine resolves to an unrelated venv; use `.venv/bin/python3` (no DYLD prefix needed)
+
+---
+
 ## 2026-06-10 — Lane Line Segmentation (BDD100K) + Interactive Geo Inspector
 
 ### What we built

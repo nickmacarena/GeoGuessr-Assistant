@@ -28,16 +28,21 @@ class LanguageDetector:
     """Fast language detection optimized for traffic sign text."""
 
     MODEL_PATH = str(Path(__file__).parent.parent.parent / "data" / "mapillary" / "lid.176.bin")
-    MIN_CONFIDENCE = 0.3  # Threshold for reliable predictions
+    # Threshold for reliable predictions. Confidences are normalized over
+    # surviving candidates: confident text lands ≥0.7, ambiguity below 0.4.
+    # Constrained (diacritic-filtered) predictions face threshold × 0.6.
+    MIN_CONFIDENCE = 0.4
 
     # Mapping of scripts to valid languages
     SCRIPT_LANGUAGES = {
+        # 'sr' appears in both: Serbian uses Latin and Cyrillic co-officially,
+        # and Latin-script Serbian dominates signage
         'latin': ['en', 'es', 'fr', 'de', 'it', 'pt', 'nl', 'sv', 'da', 'no', 'fi',
-                 'pl', 'cs', 'sk', 'hr', 'sl', 'ro', 'hu', 'et', 'lv', 'lt', 'tr',
-                 'id', 'ms', 'vi', 'tl', 'sw', 'so', 'af', 'zu', 'xh', 'is', 'ca',
-                 'eu', 'gl', 'cy', 'ga', 'gd', 'mt', 'sq', 'bs', 'mk', 'la', 'nn',
-                 'oc', 'rm', 'sc', 'wa', 'br', 'co', 'fo', 'fy', 'lb', 'li', 'mg',
-                 'mi', 'nap', 'pms', 'scn', 've', 'vec', 'vls', 'wo'],
+                 'pl', 'cs', 'sk', 'hr', 'sh', 'sr', 'sl', 'ro', 'hu', 'et', 'lv',
+                 'lt', 'tr', 'id', 'ms', 'vi', 'tl', 'sw', 'so', 'af', 'zu', 'xh',
+                 'is', 'ca', 'eu', 'gl', 'cy', 'ga', 'gd', 'mt', 'sq', 'bs', 'mk',
+                 'la', 'nn', 'oc', 'rm', 'sc', 'wa', 'br', 'co', 'fo', 'fy', 'lb',
+                 'li', 'mg', 'mi', 'nap', 'pms', 'scn', 've', 'vec', 'vls', 'wo'],
         'cjk': ['zh', 'ja', 'ko', 'wuu', 'yue', 'nan'],
         'cyrillic': ['ru', 'uk', 'bg', 'sr', 'mk', 'be', 'kk', 'ky', 'tg', 'mn'],
         'arabic': ['ar', 'fa', 'ur', 'ps', 'sd', 'ckb', 'ku'],
@@ -49,14 +54,66 @@ class LanguageDetector:
         'armenian': ['hy'],
     }
 
-    def __init__(self, model_path: Optional[str] = None):
+    # Characters that are strongly diagnostic of specific orthographies.
+    # A language is only a valid candidate if its alphabet can produce every
+    # special character observed in the text. Only narrow, high-signal
+    # characters are listed — broadly shared accents (é, à, ô, …) are omitted
+    # because too many languages (and loanwords) use them.
+    DIACRITIC_LANGS = {
+        # South Slavic / Baltic / Czech / Slovak / Estonian
+        'č': {'hr', 'sh', 'bs', 'sr', 'sl', 'cs', 'sk', 'lt', 'lv', 'et'},
+        'š': {'hr', 'sh', 'bs', 'sr', 'sl', 'cs', 'sk', 'lt', 'lv', 'et'},
+        'ž': {'hr', 'sh', 'bs', 'sr', 'sl', 'cs', 'sk', 'lt', 'lv', 'et'},
+        'ć': {'hr', 'sh', 'bs', 'sr', 'pl'},
+        'đ': {'hr', 'sh', 'bs', 'sr', 'vi'},
+        'ř': {'cs'}, 'ě': {'cs'}, 'ů': {'cs'},
+        'ľ': {'sk'}, 'ĺ': {'sk'}, 'ŕ': {'sk'},
+        # Polish
+        'ł': {'pl'}, 'ń': {'pl'}, 'ś': {'pl'}, 'ź': {'pl'},
+        'ą': {'pl', 'lt'}, 'ę': {'pl', 'lt'}, 'ż': {'pl', 'mt'},
+        # Lithuanian / Latvian
+        'ė': {'lt'}, 'į': {'lt'}, 'ų': {'lt'},
+        'ā': {'lv'}, 'ē': {'lv'}, 'ī': {'lv'}, 'ņ': {'lv'}, 'ģ': {'lv'},
+        'ķ': {'lv'}, 'ļ': {'lv'},
+        'ū': {'lt', 'lv'},
+        # Hungarian
+        'ő': {'hu'}, 'ű': {'hu'},
+        # Turkish / Romanian
+        'ı': {'tr'}, 'ğ': {'tr'},
+        'ş': {'tr', 'ro'}, 'ș': {'ro'}, 'ț': {'ro'}, 'ţ': {'ro'},
+        'ă': {'ro'},
+        'â': {'ro', 'fr', 'pt', 'vi'}, 'î': {'ro', 'fr'},
+        # Icelandic / Faroese
+        'þ': {'is'}, 'ð': {'is', 'fo'},
+        # Nordic
+        'å': {'sv', 'da', 'no', 'nn', 'fi'},
+        'ø': {'da', 'no', 'nn', 'fo'},
+        'æ': {'da', 'no', 'nn', 'is', 'fo'},
+        # German / umlaut group
+        'ß': {'de'},
+        'ä': {'de', 'sv', 'fi', 'et', 'sk'},
+        'ö': {'de', 'sv', 'fi', 'et', 'is', 'hu', 'tr'},
+        'ü': {'de', 'et', 'hu', 'tr'},
+        # Iberian
+        'ñ': {'es', 'eu', 'gl', 'tl'},
+        'ã': {'pt'}, 'õ': {'pt', 'et'},
+        'ç': {'fr', 'pt', 'ca', 'tr', 'sq'},
+        # Vietnamese
+        'ơ': {'vi'}, 'ư': {'vi'},
+    }
+
+    def __init__(self, model_path: Optional[str] = None,
+                 use_diacritic_filter: bool = True):
         """
         Initialize the language detector.
 
         Args:
             model_path: Path to fastText model. If None, uses MODEL_PATH in current dir.
+            use_diacritic_filter: Constrain predictions to languages whose
+                alphabet contains every diagnostic diacritic seen in the text.
         """
         self.model_path = model_path or self.MODEL_PATH
+        self.use_diacritic_filter = use_diacritic_filter
 
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(
@@ -71,11 +128,16 @@ class LanguageDetector:
         """Check if text is only numbers and common separators."""
         return bool(re.match(r'^[\d\s.,/\-:]+$', text.strip()))
 
-    def _is_too_short(self, text: str) -> bool:
-        """Check if text is too short for reliable detection."""
-        # Remove spaces and special chars for length check
-        clean_text = re.sub(r'[^\w]', '', text)
-        return len(clean_text) < 2
+    def _is_too_short(self, text: str, script: str = 'unknown') -> bool:
+        """Check if text is too short for reliable detection.
+
+        Counts only alphabetic characters — digits carry no language signal
+        (e.g. '63 Av' has 2 letters of content, not 4). CJK gets a lower bar
+        since two CJK characters form a real word.
+        """
+        alpha_count = sum(1 for c in text if c.isalpha())
+        min_len = 2 if script == 'cjk' else 3
+        return alpha_count < min_len
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for detection."""
@@ -184,6 +246,9 @@ class LanguageDetector:
                 - is_numeric: Boolean indicating if text is purely numeric
                 - is_short: Boolean indicating if text is very short
                 - script_validated: Boolean indicating if language matches script
+                - diacritics: Diagnostic special characters found in the text
+                - constrained: True if the diacritic filter narrowed candidates
+                  (confidence is then renormalized over surviving candidates)
         """
         result = {
             'language': 'unknown',
@@ -192,7 +257,10 @@ class LanguageDetector:
             'script': 'unknown',
             'is_numeric': False,
             'is_short': False,
-            'script_validated': True
+            'script_validated': True,
+            'diacritics': [],
+            'constrained': False,
+            'top_languages': [],
         }
 
         # Check for empty text
@@ -212,35 +280,79 @@ class LanguageDetector:
             return result
 
         # Check for very short text
-        if self._is_too_short(normalized):
+        if self._is_too_short(normalized, script):
             result['is_short'] = True
             return result
 
-        # Predict language - get top 5 predictions
-        predictions = self.model.predict(normalized, k=5)
+        lowered = normalized.lower()
 
-        # Extract language codes and confidences
-        lang_codes = [pred.replace('__label__', '') for pred in predictions[0]]
-        confidences = [float(conf) for conf in predictions[1]]
+        # Diacritic constraint: only languages whose alphabet contains every
+        # diagnostic special character in the text remain candidates
+        observed = sorted(ch for ch in set(lowered) if ch in self.DIACRITIC_LANGS)
+        result['diacritics'] = observed
+        allowed = None
+        if self.use_diacritic_filter and observed:
+            allowed = set.intersection(*(self.DIACRITIC_LANGS[ch] for ch in observed))
+            if not allowed:
+                # Conflicting constraints (multilingual sign / OCR glitch) —
+                # back off rather than force a wrong answer
+                allowed = None
 
-        # Find the first prediction that matches the script
+        # Predict language. Lowercased: fastText is case-sensitive and trained
+        # on natural-case text; ALL-CAPS signage text otherwise degrades badly.
+        # Calls the C++ binding directly: fasttext 0.9.3's Python wrapper uses
+        # np.array(probs, copy=False), which raises under NumPy 2.
+        raw = self.model.f.predict(lowered + "\n", 20, 0.0, "strict")
+        candidates = [(label.replace('__label__', ''), float(prob))
+                      for prob, label in raw]
+
+        script_valid = [(l, p) for l, p in candidates
+                        if self._validate_language_script(l, script)]
+        if allowed is not None:
+            valid = [(l, p) for l, p in script_valid if l in allowed]
+            # Sanity guard: if the surviving candidates hold little of
+            # fastText's probability mass, the constraint contradicts the
+            # model so strongly that a phantom OCR diacritic (e.g. ă read as
+            # ä) is likelier than fastText being that wrong — back off rather
+            # than renormalize a fringe candidate up to certainty.
+            # 0.15 separates measured cases: phantom-diacritic text ~14%,
+            # legit constrained text ≥19% (usually ≥50%). Backing off wrongly
+            # just reverts to unconstrained behavior, so the cost is mild.
+            script_mass = sum(p for _, p in script_valid)
+            allowed_mass = sum(p for _, p in valid)
+            if not valid or (script_mass > 0
+                             and allowed_mass / script_mass < 0.15):
+                allowed = None
+                valid = script_valid
+        else:
+            valid = script_valid
+
+        # Confidences are normalized over the surviving candidates — they
+        # answer "how sure, among the plausible languages?" so script- or
+        # alphabet-excluded competitors don't depress them
         best_lang = 'unknown'
         best_conf = 0.0
-        is_valid = False
+        is_valid = bool(valid)
+        top_languages = []
+        if valid:
+            total = sum(p for _, p in valid)
+            if total > 0:
+                top_languages = [{'language': l, 'confidence': p / total}
+                                 for l, p in valid[:3]]
+                best_lang = top_languages[0]['language']
+                best_conf = top_languages[0]['confidence']
 
-        for lang_code, confidence in zip(lang_codes, confidences):
-            if self._validate_language_script(lang_code, script):
-                best_lang = lang_code
-                best_conf = confidence
-                is_valid = True
-                break
-
+        result['constrained'] = allowed is not None
         result['script_validated'] = is_valid
         result['language'] = best_lang
         result['confidence'] = best_conf
+        result['top_languages'] = top_languages
 
-        # Mark as unknown if confidence is too low
-        if best_conf < threshold:
+        # Mark as unknown if confidence is too low. Constrained predictions
+        # get a lower bar: the alphabet filter already eliminated implausible
+        # languages, so a modest within-family confidence is still meaningful.
+        effective = threshold * 0.6 if result['constrained'] else threshold
+        if best_conf < effective:
             result['language'] = 'unknown'
 
         return result
@@ -294,6 +406,22 @@ class LanguageDetector:
             'cs': 'Czech',
             'el': 'Greek',
             'he': 'Hebrew',
+            'hr': 'Croatian',
+            'sh': 'Serbo-Croatian',
+            'sr': 'Serbian',
+            'bs': 'Bosnian',
+            'sl': 'Slovenian',
+            'sk': 'Slovak',
+            'hu': 'Hungarian',
+            'ro': 'Romanian',
+            'bg': 'Bulgarian',
+            'uk': 'Ukrainian',
+            'et': 'Estonian',
+            'lv': 'Latvian',
+            'lt': 'Lithuanian',
+            'is': 'Icelandic',
+            'id': 'Indonesian',
+            'ms': 'Malay',
             'unknown': 'Unknown'
         }
 
