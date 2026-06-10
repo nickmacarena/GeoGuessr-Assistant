@@ -124,6 +124,7 @@ def collect_city(city_name, country_hint, center_lat, center_lon, radius):
     print(f"{'='*60}")
 
     features = {}  # id -> feature dict (dedup by feature id)
+    t_start = time.time()
     for i, bbox in enumerate(tiles):
         data = query_tile(bbox)
         new = 0
@@ -141,8 +142,14 @@ def collect_city(city_name, country_hint, center_lat, center_lon, radius):
                     "sign_class": sign_class,
                 }
                 new += 1
-        if (i + 1) % 20 == 0 or i == len(tiles) - 1:
-            print(f"  Tile {i+1}/{len(tiles)} — {len(features)} unique signs so far")
+        done = i + 1
+        elapsed = time.time() - t_start
+        per_tile = elapsed / done
+        remaining = per_tile * (len(tiles) - done)
+        mins, secs = divmod(int(remaining), 60)
+        pct = done / len(tiles) * 100
+        if done % 5 == 0 or done == len(tiles):
+            print(f"  [{pct:5.1f}%] Tile {done}/{len(tiles)} | {len(features)} signs | ETA {mins}m{secs:02d}s")
         time.sleep(RATE_LIMIT_DELAY)
 
     # Reverse geocode all at once
