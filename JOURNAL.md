@@ -4,6 +4,35 @@ Running log of work done, updated with each meaningful push.
 
 ---
 
+## 2026-06-10 — Lane Line Segmentation (BDD100K) + Interactive Geo Inspector
+
+### What we built
+- **Lane mask rasterizer** (`scripts/training/bdd_rasterize_lanes.py`)
+  - Converts BDD100K poly2d lane annotations (with cubic beziers) → pixel masks
+  - Final taxonomy: 9 classes = color (white/yellow) × multiplicity (single/double) × style (solid/dashed) + bg
+  - Lane lines only — drops curb/crosswalk and transverse (`direction != parallel`) markings
+- **Kaggle training notebook** (`scripts/training/kaggle_train_lane_seg.ipynb`)
+  - DeepLabV3 + MobileNetV3-Large, 512×256, 25 epochs on T4 (~12h)
+  - Checkpoint selection by **image-level weighted F1** (class present = ≥50 px), not mIoU
+  - Masks uploaded as Kaggle dataset `burtsbeezer/bdd100k-lane-masks-v2`
+- **Trained model** (`GGAI/models/lane_segmentation_v4/best_model.pt`)
+  - Per-class F1: s_white_dashed 0.87, d_yellow_solid 0.86, s_white_solid 0.82, s_yellow_solid 0.75, s_yellow_dashed 0.58, d_yellow_dashed 0.56, d_white_solid 0.43, d_white_dashed 0.34
+  - Checkpoint embeds class names, per-class F1/IoU, presence thresholds for inference
+- **Interactive geo inspector** (`scripts/training/geo_inspector.py`)
+  - Runs sign pipeline (YOLO → EfficientNet) + lane pipeline (segmentation → connected components) independently — no fusion
+  - Outputs standalone HTML: hover any box → classification + countries where that sign design / lane marking is used
+  - Sign regions from `GGAI/models/sign_classifier/region_mapping.json` (cached from mapillary_sprite_source, 1550 entries)
+  - Demo: `assets/demo_geo_inspector.html` (BDD frame with 6 lane classes + US-only sign)
+
+### Key findings
+- **mIoU is misleading for presence tasks**: 7-class model had mIoU 0.29 (blobby masks) but image-level wF1 0.81 — presence detection is strong even when localization is sloppy
+- Fine-tuning a converged model 25 more epochs (v3) regressed val loss +30% — overfit, no metric gains
+- Dashed-vs-solid is the geo payload: s_yellow_dashed (US/CA/MX passing-allowed) successfully separated from solid (F1 0.58) despite being only 0.007% of training pixels
+- Yellow centerlines ≠ US-only: also JP/KR/TW, Latin America, Norway, Iceland; EU yellow = roadworks
+- Cross-region sanity check passed: yellow classes fire on US/BDD frames, stay quiet on a Dutch roundabout (one small false positive); EU-only sign designs surface correctly
+
+---
+
 ## 2026-03-19 — Mapillary Sign Collection Pipeline
 
 ### What we built
