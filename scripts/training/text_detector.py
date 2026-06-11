@@ -36,6 +36,18 @@ def detect_text(pil_image, min_conf=0.3):
         os.unlink(tmp_path)
 
 
+def detect_text_file(path, min_conf=0.3):
+    """Run Vision OCR directly on an image file — no decode/re-encode.
+
+    PIL reads only the header for dimensions; Vision gets the original file.
+    """
+    from PIL import Image
+
+    with Image.open(path) as im:
+        img_w, img_h = im.size
+    return _detect_from_file(str(path), img_w, img_h, min_conf)
+
+
 def _detect_from_file(path, img_w, img_h, min_conf):
     url = NSURL.fileURLWithPath_(path)
     handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
@@ -78,18 +90,37 @@ if __name__ == "__main__":
     import json
     import sys
 
-    from PIL import Image
-
     parser = argparse.ArgumentParser(description="Vision OCR")
-    parser.add_argument("image")
+    parser.add_argument("image", nargs="?",
+                        help="Image path (omit with --serve)")
     parser.add_argument("--json", action="store_true",
                         help="Emit JSON (for subprocess use by geo_inspector — "
                              "Vision SIGBUSes in-process with torch/MPS)")
+    parser.add_argument("--serve", action="store_true",
+                        help="Persistent worker: read one JSON request per "
+                             "stdin line ({image, min_conf}), write one JSON "
+                             "response per line. Avoids per-image startup.")
     parser.add_argument("--min-conf", type=float, default=0.3)
     args = parser.parse_args()
 
-    img = Image.open(args.image).convert("RGB")
-    results = detect_text(img, min_conf=args.min_conf)
+    if args.serve:
+        print(json.dumps({"ok": True, "ready": True}), flush=True)
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+                results = detect_text_file(req["image"],
+                                           req.get("min_conf", 0.3))
+                print(json.dumps({"ok": True, "results": results}), flush=True)
+            except Exception as e:
+                print(json.dumps({"ok": False, "error": str(e)}), flush=True)
+        sys.exit(0)
+
+    if not args.image:
+        parser.error("image path required unless --serve")
+    results = detect_text_file(args.image, min_conf=args.min_conf)
     if args.json:
         json.dump(results, sys.stdout)
     else:

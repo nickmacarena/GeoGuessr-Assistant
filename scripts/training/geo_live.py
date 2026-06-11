@@ -29,11 +29,13 @@ from pathlib import Path
 import torch
 from PIL import Image
 
+from concurrent.futures import ThreadPoolExecutor
+
 from geo_inspector import (
     DETECTOR_PATH, CLASSIFIER_PATH, LABEL_MAP_PATH, REGION_MAP_PATH,
     LANE_MODEL_PATH, GEO_MODEL_PATH, TEXT_PIPELINE_AVAILABLE, DEFAULT_TEXT_CONF,
     load_classifier, load_lane_model, detect_signs, detect_lanes, detect_texts,
-    render_html,
+    render_html, OCRWorker,
 )
 
 if TEXT_PIPELINE_AVAILABLE:
@@ -80,7 +82,7 @@ async function poll() {
   } catch (e) {
     document.getElementById('status').textContent = 'daemon stopped';
   }
-  setTimeout(poll, 800);
+  setTimeout(poll, 250);
 }
 poll();
 </script>
@@ -127,7 +129,7 @@ def publish(html_doc):
         STATE["status"] = f"result #{STATE['version']} — hover boxes"
 
 
-def wait_for_stable(path, checks=3, delay=0.25):
+def wait_for_stable(path, checks=2, delay=0.1):
     """Wait until file size stops changing (screenshot may still be writing)."""
     last = -1
     stable = 0
@@ -182,10 +184,27 @@ def main():
     if GEO_MODEL_PATH.exists():
         with open(GEO_MODEL_PATH) as f:
             country_model = json.load(f)
-    lang_detector = LanguageDetector() if TEXT_PIPELINE_AVAILABLE else None
-    if lang_detector is None:
+    lang_detector = None
+    ocr_worker = None
+    if TEXT_PIPELINE_AVAILABLE:
+        lang_detector = LanguageDetector()
+        ocr_worker = OCRWorker()
+    else:
         print("Text pipeline unavailable (needs macOS Vision + fasttext) — skipping.")
-    print("Models ready.")
+
+    # Warm up MPS: first inference compiles kernels (~1s+ penalty otherwise)
+    print("Warming up...")
+    t0 = time.time()
+    import numpy as np
+    dummy = Image.new("RGB", (640, 640))
+    detector(np.zeros((640, 640, 3), dtype=np.uint8), verbose=False)
+    detect_lanes(dummy, lane_model, lane_ckpt, device)
+    with torch.no_grad():
+        from geo_inspector import CLASSIFY_TF
+        classifier(CLASSIFY_TF(Image.new("RGB", (96, 96))).unsqueeze(0).to(device))
+    print(f"Models ready ({time.time() - t0:.1f}s warmup).")
+
+    ocr_pool = ThreadPoolExecutor(max_workers=1)
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -213,15 +232,21 @@ def main():
                     continue
                 t0 = time.time()
                 try:
+                    # OCR runs in its own process; overlap it with the torch
+                    # pipelines instead of paying for it serially
+                    text_future = None
+                    if lang_detector:
+                        text_future = ocr_pool.submit(
+                            detect_texts, p, lang_detector,
+                            args.text_conf, ocr_worker)
+
                     image = Image.open(p).convert("RGB")
                     sign_dets = detect_signs(
                         p, image, detector, classifier, idx2label, region_map,
                         device, args.conf, args.iou, args.top_k,
                         country_model=country_model)
                     lane_dets = detect_lanes(image, lane_model, lane_ckpt, device)
-                    text_dets = (detect_texts(p, lang_detector,
-                                              min_conf=args.text_conf)
-                                 if lang_detector else [])
+                    text_dets = text_future.result(timeout=60) if text_future else []
                     html_doc = render_html(image, sign_dets, lane_dets, p.name,
                                            text_dets=text_dets)
                     publish(html_doc)
@@ -231,10 +256,12 @@ def main():
                 except Exception as e:
                     print(f"  ERROR processing {p.name}: {e}")
                     set_status(f"error: {e}")
-            time.sleep(0.5)
+            time.sleep(0.15)
         except KeyboardInterrupt:
             print("\nStopping.")
             server.shutdown()
+            if ocr_worker:
+                ocr_worker.close()
             break
 
 

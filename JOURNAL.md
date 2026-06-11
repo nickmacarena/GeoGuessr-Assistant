@@ -20,6 +20,10 @@ Running log of work done, updated with each meaningful push.
   - **Diacritic constraint filter**: ~50 diagnostic chars (č, ő, ı, þ, ă…) restrict candidates to languages whose alphabet matches; confidences renormalized over survivors; probability-mass guard (<15%) backs off on phantom OCR diacritics
   - Sign tooltips show learned per-sign country likelihoods from the NB model; text tooltips show top-3 languages
 - **Inspector UX** (`geo_inspector.py`): boxes z-ordered by area + single page-level JS tooltip so nested detections stay hoverable; `--text-conf` flag (default 0.5 — Vision confidence is tiered ~1.0/0.5/0.3, not calibrated)
+- **Live pipeline speedup: ~4-6s → ~1.2s** screenshot-to-browser
+  - Persistent OCR worker (`text_detector.py --serve`) kills ~0.8s/shot of subprocess startup; Vision reads the screenshot file directly (no temp PNG); OCR overlaps torch inference in a thread
+  - MPS warmup at daemon startup; stability/poll waits cut ~2s → ~0.4s; display image downscaled to ≤1600px (0.4MB pages)
+  - Full 176-code fastText language-name table; tooltips show ⚡ when the alphabet filter fired
 
 ### Key findings
 - mIoU-style intuition repeated for languages: fastText is case-sensitive — ALL-CAPS signage text degrades badly, lowercase before predicting

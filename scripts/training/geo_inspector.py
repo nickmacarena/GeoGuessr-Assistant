@@ -351,27 +351,77 @@ def merge_text_lines(lines):
             for b in blocks]
 
 
-def detect_texts(image_path, lang_detector, min_conf=DEFAULT_TEXT_CONF):
+def _ocr_env():
+    """Subprocess env for the OCR worker. Strips DYLD_LIBRARY_PATH:
+    homebrew dylibs shadow the system image libraries Vision needs,
+    silently breaking OCR."""
+    import os
+    return {k: v for k, v in os.environ.items() if k != "DYLD_LIBRARY_PATH"}
+
+
+class OCRWorker:
+    """Persistent Vision OCR subprocess (one JSON request/response per line).
+
+    Spawning per image costs ~0.8s of Python/pyobjc startup; this pays it
+    once. Vision can't run in-process with torch/MPS (SIGBUS), hence a
+    subprocess at all.
+    """
+
+    def __init__(self):
+        import subprocess
+        self.proc = subprocess.Popen(
+            [sys.executable, str(TEXT_DETECTOR_SCRIPT), "--serve"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, env=_ocr_env())
+        ready = json.loads(self.proc.stdout.readline())
+        if not ready.get("ready"):
+            raise RuntimeError("OCR worker failed to start")
+
+    def ocr(self, image_path, min_conf):
+        self.proc.stdin.write(json.dumps(
+            {"image": str(image_path), "min_conf": min_conf}) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            raise RuntimeError("OCR worker died")
+        resp = json.loads(line)
+        if not resp.get("ok"):
+            raise RuntimeError(resp.get("error", "OCR failed"))
+        return resp["results"]
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.stdin.close()
+            self.proc.terminate()
+
+
+def detect_texts(image_path, lang_detector, min_conf=DEFAULT_TEXT_CONF,
+                 worker=None):
     """OCR via subprocess (Vision can't share a process with torch/MPS),
     merge lines into blocks, then run language ID per block in-process.
 
     Lines are collected down to OCR_FLOOR so multi-line sentences merge
     whole; only blocks whose best line reaches min_conf are shown.
+    Pass a persistent OCRWorker to skip per-image subprocess startup.
     """
-    import os
     import subprocess
 
-    # Strip DYLD_LIBRARY_PATH: homebrew dylibs shadow the system image
-    # libraries Vision needs, silently breaking OCR
-    env = {k: v for k, v in os.environ.items() if k != "DYLD_LIBRARY_PATH"}
-    proc = subprocess.run(
-        [sys.executable, str(TEXT_DETECTOR_SCRIPT), str(image_path),
-         "--json", "--min-conf", str(min(OCR_FLOOR, min_conf))],
-        capture_output=True, text=True, timeout=60, env=env)
-    if proc.returncode != 0:
-        print(f"  OCR subprocess failed: {proc.stderr.strip()[:200]}")
-        return []
-    ocr_results = json.loads(proc.stdout)
+    floor = min(OCR_FLOOR, min_conf)
+    if worker is not None:
+        try:
+            ocr_results = worker.ocr(image_path, floor)
+        except Exception as e:
+            print(f"  OCR worker failed: {e}")
+            return []
+    else:
+        proc = subprocess.run(
+            [sys.executable, str(TEXT_DETECTOR_SCRIPT), str(image_path),
+             "--json", "--min-conf", str(floor)],
+            capture_output=True, text=True, timeout=60, env=_ocr_env())
+        if proc.returncode != 0:
+            print(f"  OCR subprocess failed: {proc.stderr.strip()[:200]}")
+            return []
+        ocr_results = json.loads(proc.stdout)
 
     blocks = merge_text_lines(ocr_results)
     blocks = [b for b in blocks if b["conf"] >= min_conf]
@@ -546,19 +596,21 @@ def text_tooltip(det):
         f"<b>{html.escape(name)}</b> <span class='conf'>{conf:.0%}</span>"
         for name, conf in top_langs)
 
+    extras = []
     if lang.get("constrained"):
-        chars = ", ".join(lang.get("diacritics", []))
-        constraint_html = (f"<div class='note'>Alphabet constraint active: "
-                           f"&lsquo;{html.escape(chars)}&rsquo; — only languages "
-                           f"whose alphabet has these characters considered.</div>")
-    else:
-        constraint_html = ""
+        chars = " ".join(lang.get("diacritics", []))
+        extras.append(f"⚡ alphabet filter: {html.escape(chars)} — "
+                      f"non-matching languages excluded")
+    if lang["script"] not in ("latin", "unknown"):
+        extras.append(f"script: {html.escape(lang['script'])}")
+    extras_html = (f"<div class='note'>{' · '.join(extras)}</div>"
+                   if extras else "")
 
     if lang["language"] == "unknown":
         weak = (f"<div class='note'>Weak guesses: {tops_html}</div>"
                 if top_langs else "")
         return (header + "<div class='note'>Language unclear "
-                "(below confidence threshold).</div>" + weak + constraint_html)
+                "(below confidence threshold).</div>" + weak + extras_html)
 
     countries = LANG_COUNTRIES.get(lang["language"])
     if countries:
@@ -567,17 +619,23 @@ def text_tooltip(det):
     else:
         country_html = ""
     return (header
-            + f"<div>Language: {tops_html} "
-              f"<span class='note'>(script: {html.escape(lang['script'])})</span></div>"
-            + country_html + constraint_html)
+            + f"<div>Language: {tops_html}</div>"
+            + country_html + extras_html)
 
 
 def render_html(image, sign_dets, lane_dets, title, text_dets=None):
     img_w, img_h = image.size
     text_dets = text_dets or []
 
+    # Boxes are percentage-positioned against the original dimensions, so the
+    # embedded image can be downscaled freely — faster encode, lighter page
+    display = image
+    if max(image.size) > 1600:
+        display = image.copy()
+        display.thumbnail((1600, 1600))
+
     buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=88)
+    display.save(buf, format="JPEG", quality=88)
     img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
     entries = []
@@ -607,7 +665,7 @@ def render_html(image, sign_dets, lane_dets, title, text_dets=None):
 
     return HTML_TEMPLATE.format(
         title=html.escape(title), img_b64=img_b64,
-        img_w=img_w, img_h=img_h,
+        img_w=display.size[0], img_h=display.size[1],
         legend=legend,
         boxes="".join(boxes),
         script=TOOLTIP_SCRIPT)
